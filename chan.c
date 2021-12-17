@@ -47,7 +47,7 @@ struct chan_header {
 
 #define chan_receive(ch, dest) (chan_receive_(&(ch)->header, (void*)(dest), sizeof(*(dest)=(ch)->queue[0]), 0, false))
 
-#define chan_receivetimed(ch, timeout_ms, dest) (chan_receive_(&(ch)->header, (void*)(dest), sizeof(*(dest)=(ch)->queue[0]), (timeout_ms), false))
+#define chan_receivetimed(ch, timeout_ms, dest) (chan_receive_(&(ch)->header, (void*)(dest), sizeof(*(dest)=(ch)->queue[0]), (timeout_ms), true))
 
 #define chan_close(ch) (chan_close_(&(ch)->header))
 
@@ -184,12 +184,13 @@ int chan_receive_(struct chan_header* ch, void* arg, size_t arg_size, int32_t ti
     //printf("max_items: %zu; queue_size: %zu; elem_size: %zu\n", max_items, ch->queue_size, ch->value_size);
 
     mtx_lock(&ch->mtx);
-    if (ch->is_closed) {
-        result = chan_closed;
-        goto end;
-    }
 
     while (ch->num_items == 0) {
+        if (ch->is_closed) {
+            result = chan_closed;
+            goto end;
+        }
+
         if (timeout) {
             if (timeout_ms == 0) {
                 result = chan_timedout;
@@ -257,6 +258,8 @@ bool chan_basictest() {
 
     int_chan_t ch;
     chan_init(&ch);
+    assert(ch.header.value_size == sizeof(int));
+
     printf("chan_send: %s\n", chan_errorstr( chan_send(&ch, 42) ));
 
     int result;
@@ -289,14 +292,17 @@ bool chan_closedtest() {
 }
 
 
+#define ASYNC_TEST_NUM_ITEMS (100)
+
 static int producer_thread(void* arg) {
     int_chan_t* ch = arg;
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < ASYNC_TEST_NUM_ITEMS; i++) {
         printf("sending: %d\n", i);
         chan_send(ch, i);
         thrd_sleep(&(struct timespec){.tv_nsec=48*1000000}, NULL);
     }
     chan_close(ch);
+    assert(chan_send(ch, 100) == chan_closed);
     return 0;
 }
 
@@ -310,6 +316,7 @@ bool chan_asynctest() {
 
     thrd_create(&thread, producer_thread, &ch);
 
+    int itemsreceived = 0;
     int prevresult = -1;
     int result = 0;
     int err;
@@ -317,9 +324,11 @@ bool chan_asynctest() {
         printf("received: %d\n", result);
         assert((result - prevresult) == 1);
         prevresult = result;
+        itemsreceived++;
         thrd_sleep(&(struct timespec){.tv_nsec=200*1000000}, NULL);
     }
     assert(err == chan_closed);
+    assert(itemsreceived == ASYNC_TEST_NUM_ITEMS);
 
     chan_destroy(&ch);
     thrd_join(thread, NULL);
@@ -327,8 +336,103 @@ bool chan_asynctest() {
     return true;
 }
 
+
+static int producer_thread_timeout(void* arg) {
+    int_chan_t* ch = arg;
+    for (int i = 0; i < ASYNC_TEST_NUM_ITEMS; i++) {
+        int err = 0;
+        printf("sending: %d %s\n", i, chan_errorstr( err = chan_sendtimed(ch, 20, i) ));
+        if (err == chan_timedout) {
+            i -= 1;
+        }
+        thrd_sleep(&(struct timespec){.tv_nsec=48*1000000}, NULL);
+    }
+    chan_close(ch);
+    assert(chan_send(ch, 100) == chan_closed);
+    return 0;
+}
+
+bool chan_asynctimeouttest() {
+    puts("chan_asynctimeouttest");
+
+    thrd_t thread;
+    int_chan_t ch;
+
+    chan_init(&ch);
+
+    thrd_create(&thread, producer_thread_timeout, &ch);
+
+    int itemsreceived = 0;
+    int prevresult = -1;
+    int result = 0;
+    int err;
+    while (!(err = chan_receive(&ch, &result))) {
+        printf("received: %d\n", result);
+        assert((result - prevresult) == 1);
+        prevresult = result;
+        itemsreceived++;
+        thrd_sleep(&(struct timespec){.tv_nsec=200*1000000}, NULL);
+    }
+    assert(err == chan_closed);
+    assert(itemsreceived == ASYNC_TEST_NUM_ITEMS);
+
+    chan_destroy(&ch);
+    thrd_join(thread, NULL);
+
+    return true;
+}
+
+
+static int receiver_thread_timeout(void* arg) {
+    int_chan_t* ch = arg;
+    int itemsreceived = 0;
+    int prevresult = -1;
+    int result = 0;
+    int err = chan_success;
+    while (err == chan_success || err == chan_timedout) {
+        err = chan_receivetimed(ch, 20, &result);
+        printf("(receiver thread) receiving: %d %s\n", result, chan_errorstr( err ));
+        if (err == chan_success) {
+            assert((result - prevresult) == 1); // assert no skipping
+            itemsreceived++;
+            prevresult = result;
+        }
+        thrd_sleep(&(struct timespec){.tv_nsec=48*1000000}, NULL);
+    }
+    assert(err == chan_closed);
+    assert(itemsreceived == ASYNC_TEST_NUM_ITEMS);
+    return 0;
+}
+
+bool chan_receivetimeouttest() {
+    puts("chan_receivetimeouttest");
+
+    thrd_t thread;
+    int_chan_t ch;
+
+    chan_init(&ch);
+
+    thrd_create(&thread, receiver_thread_timeout, &ch);
+
+    for (int i = 0; i < ASYNC_TEST_NUM_ITEMS; i++) {
+        int err = 0;
+        printf("sending: %d %s\n", i, chan_errorstr( err = chan_sendtimed(&ch, 20, i) ));
+        if (err == chan_timedout) {
+            i -= 1;
+        }
+        thrd_sleep(&(struct timespec){.tv_nsec=200*1000000}, NULL);
+    }
+
+    chan_close(&ch);
+    thrd_join(thread, NULL);
+    chan_destroy(&ch);
+
+    return true;
+}
+
+
 bool chan_runtest() {
-    return chan_basictest() && chan_closedtest() && chan_asynctest();
+    return chan_basictest() && chan_closedtest() && chan_asynctest() && chan_asynctimeouttest() && chan_receivetimeouttest();
 }
 
 #endif
