@@ -1,3 +1,7 @@
+/**
+ * chan.c - Go-like channels for C.
+ * Written by Guilherme Nemeth. Public domain.
+ */
 #pragma once
 
 #include <stdint.h>
