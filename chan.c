@@ -146,8 +146,26 @@ end:
 
 #ifdef chan_unittest
 
+typedef chan_of(int, 32) int_chan_t;
+
+bool chan_basictest() {
+    puts("chan_basictest");
+
+    int_chan_t ch;
+    chan_init(&ch);
+    chan_send(&ch, 42);
+
+    int result;
+    chan_receive(&ch, &result);
+    assert(result == 42);
+
+    chan_destroy(&ch);
+
+    return true;
+}
+
 bool chan_runtest() {
-    return false;
+    return chan_basictest();
 }
 
 #endif
